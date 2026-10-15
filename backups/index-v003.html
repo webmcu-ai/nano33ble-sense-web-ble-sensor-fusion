@@ -1,0 +1,1028 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nano 33 BLE Sense - Sensor Trainer</title>
+<style>
+   :root { --bg:#0f1419; --card:#171d25; --line:#2b3441; --fg:#e6edf3; --dim:#8b98a5; --go:#2ea043; --warn:#d29922; --bad:#f85149; }
+   @media (prefers-color-scheme: light) { :root { --bg:#f4f6f8; --card:#ffffff; --line:#d0d7de; --fg:#1f2328; --dim:#59636e; } }
+   body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.45 system-ui, sans-serif; }
+   main { max-width:1000px; margin:0 auto; padding:16px; }
+   section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin:14px 0; }
+   h1 { font-size:24px; margin:8px 0 2px; }
+   h2 { font-size:17px; margin:0 0 10px; }
+   h2 b { background:var(--go); color:#fff; border-radius:50%; display:inline-block; width:24px; height:24px; text-align:center; margin-right:8px; }
+   h4 { margin:12px 0 6px; font-size:13px; color:var(--dim); font-weight:600; }
+   button, select, input { font:inherit; color:var(--fg); background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:5px 10px; }
+   button { cursor:pointer; }
+   button.go { background:var(--go); border-color:var(--go); color:#fff; }
+   button.blue { background:#1f6feb; border-color:#1f6feb; color:#fff; }
+   button:disabled { opacity:.45; cursor:default; }
+   input[type=number] { width:70px; }
+   .dim { color:var(--dim); }
+   .chip { display:inline-flex; align-items:center; gap:5px; margin-right:12px; }
+   .ok { color:var(--go); } .warn { color:var(--warn); } .bad { color:var(--bad); }
+   .bar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:6px 0; }
+   .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(140px, 1fr)); gap:8px; }
+   .tile { border:1px solid var(--line); border-radius:8px; padding:6px 8px; }
+   .tile span { font-size:12px; color:var(--dim); } .tile b { float:right; font-variant-numeric:tabular-nums; }
+   canvas { width:100%; height:34px; display:block; }
+   canvas.big { height:150px; }
+   .dot { width:14px; height:14px; border-radius:50%; display:inline-block; border:1px solid var(--line); }
+   .prob { display:flex; align-items:center; gap:8px; margin:4px 0; }
+   .prob span { width:110px; } .prob div { flex:1; background:var(--bg); border-radius:4px; height:16px; }
+   .prob i { display:block; height:100%; border-radius:4px; width:0; } .prob b { width:48px; text-align:right; }
+   textarea { width:100%; height:160px; background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:6px; font:12px monospace; box-sizing:border-box; }
+   code { background:var(--bg); padding:1px 5px; border-radius:4px; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Nano 33 BLE Sense &middot; Sensor Trainer</h1>
+<div class="dim">Collect sensor data, train, test, then bake the model into the Nano's firmware. One board, no SD card. Use Chrome or Edge.</div>
+
+<!-- ================= NANO STATUS BANNER ================= -->
+<section id="myTop">
+   <div id="myTopStatus">Nano: not connected</div>
+   <div id="myTopClasses"></div>
+   <div class="bar"><button id="myTopBtn" class="go" style="display:none" onclick="myToggleTest('nano')">Watch what the Nano sees</button><b id="myTopResult"></b></div>
+</section>
+
+<!-- ================= 0. CONNECT ================= -->
+<section>
+   <h2><b>0</b>Connect</h2>
+   <div class="bar">
+      <button class="blue" id="myBtnBle" onclick="myConnectBle()">Connect Bluetooth</button>
+      <button class="blue" id="myBtnSerial" onclick="myConnectSerial()">Connect USB (Serial)</button>
+      <button onclick="myDisconnect()">Disconnect</button>
+      <span id="myConnStatus" class="dim">not connected</span>
+   </div>
+   <div class="dim">Both do exactly the same things. Bluetooth is wireless, USB is the most reliable (and the Arduino Serial Monitor must be closed).</div>
+</section>
+
+<!-- ================= 1. LIVE SENSORS ================= -->
+<section>
+   <h2><b>1</b>Live sensors <span class="dim" style="font-weight:normal">&mdash; all 17 values the model uses</span></h2>
+   <div id="mySensorTiles"></div>
+</section>
+
+<!-- ================= 2. COLLECT ================= -->
+<section>
+   <h2><b>2</b>Classes and samples</h2>
+   <div class="dim">Name your classes (max 7, 12 characters). Click Record while doing that thing with the Nano. Each sample is a 1 second window of all sensors. Aim for 30+ samples per class, and vary how you do the action. The dot is the colour the Nano's RGB LED will show for that class.</div>
+   <div class="bar">
+      Windows per click: <select id="myPerClick"><option>1</option><option>5</option><option selected>10</option><option>20</option></select>
+      Start delay: <select id="myDelay"><option value="0">none</option><option value="2" selected>2 s</option><option value="5">5 s</option></select>
+      <button id="myStopBtn" onclick="myStop = true" disabled>Stop</button>
+   </div>
+   <div id="myClassList"></div>
+   <div class="bar">
+      <button onclick="myAddClass()">+ Add class</button>
+      <button onclick="myClearAll()">Clear all samples</button>
+      <button onclick="mySaveProject()">Save project (.json)</button>
+      <button onclick="document.getElementById('myProjectFile').click()">Load project</button>
+      <input type="file" id="myProjectFile" accept=".json" style="display:none" onchange="myLoadProject(event)">
+   </div>
+   <div id="myRecStatus" class="dim">Connect a Nano, then record.</div>
+   <h4>Last captured window: 10 fast channels over 1 s, then the 7 slow sensors (one reading per window)</h4>
+   <div id="myWindowTiles" class="grid"></div>
+</section>
+
+<!-- ================= 3. TRAIN ================= -->
+<section>
+   <h2><b>3</b>Train</h2>
+   <div class="bar">
+      Epochs: <input type="number" id="myEpochs" value="60" min="1">
+      Learning rate: <input type="number" id="myLr" value="0.01" step="0.001" min="0.0001">
+      <button class="go" onclick="myTrainClick()">Train (starts fresh)</button>
+   </div>
+   <div id="myTrainStatus" class="dim">Not trained yet.</div>
+   <canvas id="myLossChart" class="big" width="900" height="150"></canvas>
+   <div class="dim">Orange = loss, green = accuracy on the training samples.</div>
+</section>
+
+<!-- ================= 4. TEST ================= -->
+<section>
+   <h2><b>4</b>Test</h2>
+   <div class="bar">
+      <button id="myBtnTestBrowser" onclick="myToggleTest('browser')">Test in browser</button>
+      <button onclick="myPushModel()">Send model to Nano</button>
+      <button id="myBtnTestNano" onclick="myToggleTest('nano')">Test on Nano</button>
+      <button onclick="myCheckNano()">Check Nano</button>
+   </div>
+   <div class="dim">"Test in browser" runs the model here on live windows from the Nano. "Send model to Nano" loads it into the Nano's RAM (lost at reboot), then "Test on Nano" shows what the Nano itself decides.</div>
+   <div id="myNanoStatus" class="dim">Nano model: unknown (press Check Nano)</div>
+   <div id="myTestStatus" class="dim"></div>
+   <div id="myProbs"></div>
+</section>
+
+<!-- ================= 5. BAKE ================= -->
+<section>
+   <h2><b>5</b>Bake the model into the Nano</h2>
+   <div id="myDeployInfo" class="dim">Train a model first.</div>
+   <div class="bar"><button class="go" id="myBtnHeader" onclick="myDownloadHeader()" disabled>Download myNanoModel.h</button></div>
+   <ol>
+      <li>Save <code>myNanoModel.h</code> in the sketch folder, next to <code>nano33-ble-trainer.ino</code>.</li>
+      <li>In the Arduino IDE, open the sketch and press Upload. The file is detected automatically.</li>
+      <li>Power the Nano from any USB supply, no computer needed. After a few seconds the RGB LED shows the class. Press Check Nano above to confirm it holds the baked model.</li>
+   </ol>
+</section>
+
+<details>
+   <summary>Log</summary>
+   <textarea id="myLogArea" readonly></textarea>
+   <div><button onclick="document.getElementById('myLogArea').value = ''">Clear log</button></div>
+</details>
+
+<p class="dim">By Jeremy Ellis &middot; webmcu-ai &middot; MIT license &middot; use at your own risk</p>
+</main>
+
+<script>
+// =====================================================================
+// CORE: pure functions, no page access. Same network as nano33-ble-trainer.ino
+//   Conv1D(k=5,f=8) -> MaxPool/2 -> flatten(144) ++ static(7) = 151
+//   -> Dense(32) -> Dense(16) -> Output(N classes, softmax)
+// =====================================================================
+// ==== CORE-BEGIN
+const MY_FAST = 10, MY_STATIC = 7, MY_STEPS = 40, MY_WIN = MY_STEPS * MY_FAST + MY_STATIC   // 407
+const MY_KERNEL = 5, MY_FILTERS = 8
+const MY_OUT_STEPS = MY_STEPS - MY_KERNEL + 1            // 36
+const MY_POOL = Math.floor(MY_OUT_STEPS / 2)             // 18
+const MY_FLAT = MY_POOL * MY_FILTERS                     // 144
+const MY_COMBINED = MY_FLAT + MY_STATIC                  // 151
+const MY_D1 = 32, MY_D2 = 16
+const MY_MAX_CLASSES = 7, MY_LABEL_LEN = 12
+
+// fixed static-feature scaling, must match the .ino
+const MY_PRESSURE_BASE = 101.0, MY_PRESSURE_SCALE = 5.0
+const MY_TEMP_BASE = 20.0,      MY_TEMP_SCALE = 10.0
+const MY_HUM_BASE = 50.0,       MY_HUM_SCALE = 25.0
+const MY_PROX_SCALE = 255.0,    MY_COLOR_SCALE = 1000.0
+
+function myLeaky(x){ return x > 0 ? x : 0.1 * x }
+function myLeakyD(x){ return x > 0 ? 1.0 : 0.1 }
+function myClip(v, lo, hi){ if (!isFinite(v)) return 0; return Math.min(Math.max(v, lo), hi) }
+function myClipStep(v){ if (!isFinite(v)) return 0; return Math.min(Math.max(v, -1), 1) }   // bounds every weight update so one bad step can never make NaN
+
+// only letters, numbers, _ and - ; max 12 chars (same limit as the Nano's label buffer)
+function mySafeLabel(s, i){
+   let t = String(s || '').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, MY_LABEL_LEN)
+   return t.length ? t : 'class' + i
+}
+
+function myRand(size, std){
+   let a = new Float32Array(size)
+   for (let i = 0; i < size; i++) a[i] = (Math.random() - 0.5) * 2 * std
+   return a
+}
+
+function myNewModel(n, labels){
+   return {
+      n: n, labels: labels.slice(),
+      conv1_w: myRand(MY_KERNEL * MY_FAST * MY_FILTERS, Math.sqrt(2 / (MY_KERNEL * MY_FAST))), conv1_b: new Float32Array(MY_FILTERS),
+      dense1_w: myRand(MY_COMBINED * MY_D1, Math.sqrt(2 / MY_COMBINED)), dense1_b: new Float32Array(MY_D1),
+      dense2_w: myRand(MY_D1 * MY_D2, Math.sqrt(2 / MY_D1)), dense2_b: new Float32Array(MY_D2),
+      output_w: myRand(MY_D2 * n, Math.sqrt(2 / MY_D2)), output_b: new Float32Array(n),
+      calibMean: new Float32Array(MY_FAST), calibStd: new Float32Array(MY_FAST).fill(1)
+   }
+}
+
+// per-channel mean/std of the 10 fast channels over every sample in the dataset
+function myCalibrate(m, samples){
+   for (let c = 0; c < MY_FAST; c++){
+      let sum = 0, sum2 = 0, cnt = 0
+      samples.forEach(function(s){
+         for (let t = 0; t < MY_STEPS; t++){ let v = s.w[t * MY_FAST + c]; sum += v; sum2 += v * v; cnt++ }
+      })
+      let mean = sum / cnt
+      m.calibMean[c] = mean
+      m.calibStd[c] = Math.max(Math.sqrt(Math.max(sum2 / cnt - mean * mean, 0)), 0.01)
+   }
+}
+
+function myNormalize(raw, m){
+   let b = Float32Array.from(raw)
+   for (let t = 0; t < MY_STEPS; t++){
+      for (let c = 0; c < MY_FAST; c++){
+         let i = t * MY_FAST + c
+         b[i] = myClip((b[i] - m.calibMean[c]) / (m.calibStd[c] + 1e-8), -5, 5)
+      }
+   }
+   let f = MY_STEPS * MY_FAST
+   b[f + 0] = myClip((b[f + 0] - MY_PRESSURE_BASE) / MY_PRESSURE_SCALE, -5, 5)
+   b[f + 1] = myClip((b[f + 1] - MY_TEMP_BASE) / MY_TEMP_SCALE, -5, 5)
+   b[f + 2] = myClip((b[f + 2] - MY_HUM_BASE) / MY_HUM_SCALE, -5, 5)
+   b[f + 3] = myClip(b[f + 3] / MY_PROX_SCALE, 0, 5)
+   b[f + 4] = myClip(b[f + 4] / MY_COLOR_SCALE, 0, 5)
+   b[f + 5] = myClip(b[f + 5] / MY_COLOR_SCALE, 0, 5)
+   b[f + 6] = myClip(b[f + 6] / MY_COLOR_SCALE, 0, 5)
+   return b
+}
+
+function myForward(x, m){
+   let conv = new Float32Array(MY_OUT_STEPS * MY_FILTERS)
+   for (let s = 0; s < MY_OUT_STEPS; s++){
+      for (let f = 0; f < MY_FILTERS; f++){
+         let sum = m.conv1_b[f]
+         for (let k = 0; k < MY_KERNEL; k++){
+            for (let c = 0; c < MY_FAST; c++) sum += x[(s + k) * MY_FAST + c] * m.conv1_w[(k * MY_FAST + c) * MY_FILTERS + f]
+         }
+         conv[s * MY_FILTERS + f] = myLeaky(sum)
+      }
+   }
+   let pool = new Float32Array(MY_FLAT), win = new Int8Array(MY_FLAT)
+   for (let s = 0; s < MY_POOL; s++){
+      for (let f = 0; f < MY_FILTERS; f++){
+         let a = conv[(s * 2) * MY_FILTERS + f], b = conv[(s * 2 + 1) * MY_FILTERS + f]
+         win[s * MY_FILTERS + f] = a >= b ? 0 : 1
+         pool[s * MY_FILTERS + f] = a >= b ? a : b
+      }
+   }
+   let comb = new Float32Array(MY_COMBINED)
+   comb.set(pool, 0)
+   for (let i = 0; i < MY_STATIC; i++) comb[MY_FLAT + i] = x[MY_STEPS * MY_FAST + i]
+   let d1 = new Float32Array(MY_D1)
+   for (let j = 0; j < MY_D1; j++){
+      let sum = m.dense1_b[j]
+      for (let i = 0; i < MY_COMBINED; i++) sum += comb[i] * m.dense1_w[i * MY_D1 + j]
+      d1[j] = myLeaky(sum)
+   }
+   let d2 = new Float32Array(MY_D2)
+   for (let j = 0; j < MY_D2; j++){
+      let sum = m.dense2_b[j]
+      for (let i = 0; i < MY_D1; i++) sum += d1[i] * m.dense2_w[i * MY_D2 + j]
+      d2[j] = myLeaky(sum)
+   }
+   let out = new Array(m.n)
+   for (let j = 0; j < m.n; j++){
+      let sum = m.output_b[j]
+      for (let i = 0; i < MY_D2; i++) sum += d2[i] * m.output_w[i * m.n + j]
+      out[j] = sum
+   }
+   let mx = Math.max.apply(null, out)
+   let ex = out.map(function(v){ return Math.exp(v - mx) })
+   let tot = ex.reduce(function(a, b){ return a + b }, 0)
+   return { conv: conv, win: win, comb: comb, d1: d1, d2: d2, probs: ex.map(function(v){ return v / tot }) }
+}
+
+// one SGD step on one normalized sample. returns {loss, correct}
+function myTrainStep(x, label, lr, m){
+   let f = myForward(x, m), n = m.n
+   let od = f.probs.slice(); od[label] -= 1
+   let pred = f.probs.indexOf(Math.max.apply(null, f.probs))
+   // output layer
+   let d2d = new Float32Array(MY_D2)
+   for (let i = 0; i < MY_D2; i++){
+      let s = 0
+      for (let j = 0; j < n; j++) s += od[j] * m.output_w[i * n + j]
+      d2d[i] = s * myLeakyD(f.d2[i])
+   }
+   for (let j = 0; j < n; j++){
+      m.output_b[j] -= myClipStep(lr * od[j])
+      for (let i = 0; i < MY_D2; i++) m.output_w[i * n + j] -= myClipStep(lr * od[j] * f.d2[i])
+   }
+   // dense2
+   let d1d = new Float32Array(MY_D1)
+   for (let i = 0; i < MY_D1; i++){
+      let s = 0
+      for (let j = 0; j < MY_D2; j++) s += d2d[j] * m.dense2_w[i * MY_D2 + j]
+      d1d[i] = s * myLeakyD(f.d1[i])
+   }
+   for (let j = 0; j < MY_D2; j++){
+      m.dense2_b[j] -= myClipStep(lr * d2d[j])
+      for (let i = 0; i < MY_D1; i++) m.dense2_w[i * MY_D2 + j] -= myClipStep(lr * d2d[j] * f.d1[i])
+   }
+   // dense1
+   let pd = new Float32Array(MY_FLAT)
+   for (let i = 0; i < MY_FLAT; i++){
+      let s = 0
+      for (let j = 0; j < MY_D1; j++) s += d1d[j] * m.dense1_w[i * MY_D1 + j]
+      pd[i] = s
+   }
+   for (let j = 0; j < MY_D1; j++){
+      m.dense1_b[j] -= myClipStep(lr * d1d[j])
+      for (let i = 0; i < MY_COMBINED; i++) m.dense1_w[i * MY_D1 + j] -= myClipStep(lr * d1d[j] * f.comb[i])
+   }
+   // pool -> conv
+   let cd = new Float32Array(MY_OUT_STEPS * MY_FILTERS)
+   for (let s = 0; s < MY_POOL; s++){
+      for (let q = 0; q < MY_FILTERS; q++){
+         let step = f.win[s * MY_FILTERS + q] === 0 ? s * 2 : s * 2 + 1
+         cd[step * MY_FILTERS + q] = pd[s * MY_FILTERS + q] * myLeakyD(f.conv[step * MY_FILTERS + q])
+      }
+   }
+   for (let s = 0; s < MY_OUT_STEPS; s++){
+      for (let q = 0; q < MY_FILTERS; q++){
+         let g = cd[s * MY_FILTERS + q]
+         if (g === 0) continue
+         m.conv1_b[q] -= myClipStep(lr * g)
+         for (let k = 0; k < MY_KERNEL; k++){
+            for (let c = 0; c < MY_FAST; c++) m.conv1_w[(k * MY_FAST + c) * MY_FILTERS + q] -= myClipStep(lr * g * x[(s + k) * MY_FAST + c])
+         }
+      }
+   }
+   return { loss: -Math.log(Math.max(f.probs[label], 1e-8)), correct: pred === label }
+}
+
+// one shuffled pass over items [{x, y}], returns {loss, acc}
+function myTrainEpoch(m, items, lr){
+   let order = items.map(function(v, i){ return i })
+   for (let i = order.length - 1; i > 0; i--){
+      let j = Math.floor(Math.random() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]
+   }
+   let loss = 0, ok = 0
+   order.forEach(function(i){
+      let r = myTrainStep(items[i].x, items[i].y, lr, m)
+      loss += r.loss; if (r.correct) ok++
+   })
+   // gentle weight decay each epoch: stops the net memorising sensor noise (big help with small datasets)
+   ;['conv1_w', 'dense1_w', 'dense2_w', 'output_w'].forEach(function(k){
+      for (let i = 0; i < m[k].length; i++) m[k][i] *= 0.98
+   })
+   return { loss: loss / items.length, acc: ok / items.length }
+}
+
+// model package for the BLE/USB push: floats then "label0|label1|..." text
+function myPackModel(m){
+   let parts = [[m.n], m.conv1_w, m.conv1_b, m.dense1_w, m.dense1_b, m.dense2_w, m.dense2_b, m.output_w, m.output_b, m.calibMean, m.calibStd]
+   let count = parts.reduce(function(a, p){ return a + p.length }, 0)
+   let text = new TextEncoder().encode(m.labels.join('|'))
+   let buf = new ArrayBuffer(count * 4 + text.length)
+   let view = new DataView(buf), off = 0
+   parts.forEach(function(p){ for (let i = 0; i < p.length; i++){ view.setFloat32(off, p[i], true); off += 4 } })
+   new Uint8Array(buf).set(text, off)
+   return new Uint8Array(buf)
+}
+
+function myFormatArray(name, arr){
+   let lines = ['const float ' + name + '[] = {']
+   for (let i = 0; i < arr.length; i += 8){
+      let row = []
+      for (let j = i; j < Math.min(i + 8, arr.length); j++) row.push((isFinite(arr[j]) ? arr[j] : 0).toPrecision(9) + 'f')
+      lines.push('  ' + row.join(', ') + (i + 8 < arr.length ? ',' : ''))
+   }
+   lines.push('};')
+   return lines.join('\n')
+}
+
+function myMakeHeader(m){
+   let L = []
+   L.push('// myNanoModel.h - made by the Nano 33 BLE Sense Sensor Trainer page')
+   L.push('// Made: ' + new Date().toISOString())
+   L.push('// Classes: ' + m.labels.join(', '))
+   L.push('// Put this file in the same folder as nano33-ble-trainer.ino and press Upload.')
+   L.push('#ifndef MY_NANO_MODEL_H')
+   L.push('#define MY_NANO_MODEL_H')
+   L.push('#define MY_BAKED_NUM_CLASSES ' + m.n)
+   L.push('const char* const myModel_labels[MY_BAKED_NUM_CLASSES] = { ' + m.labels.map(function(s){ return '"' + s + '"' }).join(', ') + ' };')
+   let names = ['conv1_w', 'conv1_b', 'dense1_w', 'dense1_b', 'dense2_w', 'dense2_b', 'output_w', 'output_b', 'calibMean', 'calibStd']
+   names.forEach(function(k){ L.push(myFormatArray('myModel_' + k, m[k])) })
+   L.push('#endif')
+   return L.join('\n') + '\n'
+}
+// ==== CORE-END
+
+// =====================================================================
+// STATE
+// =====================================================================
+const MY_SERVICE = '7e400001-b2c3-5d4e-af60-9b3c7d8eaf20'
+const MY_CHAR_CONTROL = '7e400002-b2c3-5d4e-af60-9b3c7d8eaf20'
+const MY_CHAR_LIVE    = '7e400003-b2c3-5d4e-af60-9b3c7d8eaf20'
+const MY_CHAR_BINARY  = '7e400004-b2c3-5d4e-af60-9b3c7d8eaf20'
+const MY_CHAR_MODEL   = '7e400005-b2c3-5d4e-af60-9b3c7d8eaf20'
+const MY_CHAR_RESULT  = '7e400006-b2c3-5d4e-af60-9b3c7d8eaf20'
+const MY_COLORS = ['#ff4d4d', '#3fb950', '#4d8dff', '#f2cc3c', '#3cd4d4', '#d84dd8', '#ffffff']   // same order as the Nano's LED
+const MY_STORE_KEY = 'nano33-trainer-project-v1'
+
+const mySensors = [
+   { n:'Accel X', u:'g', d:2, g:'Accelerometer - LSM9DS1 / BMI270' }, { n:'Accel Y', u:'g', d:2, g:'Accelerometer - LSM9DS1 / BMI270' }, { n:'Accel Z', u:'g', d:2, g:'Accelerometer - LSM9DS1 / BMI270' },
+   { n:'Gyro X', u:'dps', d:1, g:'Gyroscope - LSM9DS1 / BMI270' }, { n:'Gyro Y', u:'dps', d:1, g:'Gyroscope - LSM9DS1 / BMI270' }, { n:'Gyro Z', u:'dps', d:1, g:'Gyroscope - LSM9DS1 / BMI270' },
+   { n:'Mag X', u:'uT', d:1, g:'Magnetometer - LSM9DS1 / BMM150' }, { n:'Mag Y', u:'uT', d:1, g:'Magnetometer - LSM9DS1 / BMM150' }, { n:'Mag Z', u:'uT', d:1, g:'Magnetometer - LSM9DS1 / BMM150' },
+   { n:'Mic level', u:'', d:0, g:'Microphone - MP34DT05' },
+   { n:'Pressure', u:'kPa', d:2, g:'Pressure - LPS22HB' },
+   { n:'Temperature', u:'C', d:1, g:'Temperature and humidity - HTS221 / HS3003' }, { n:'Humidity', u:'%', d:1, g:'Temperature and humidity - HTS221 / HS3003' },
+   { n:'Proximity', u:'0 near - 255 far', d:0, g:'Proximity and colour - APDS9960' },
+   { n:'Red', u:'', d:0, g:'Proximity and colour - APDS9960' }, { n:'Green', u:'', d:0, g:'Proximity and colour - APDS9960' }, { n:'Blue', u:'', d:0, g:'Proximity and colour - APDS9960' }
+]
+const MY_HIST = 60
+
+let myLink = null                    // active connection {kind, name, send(), pushModel(), close()}
+let myClasses = ['still', 'shake', 'covered']
+let myDataset = []                   // [{c: classIndex, w: Float32Array(407)}]
+let myModel = null                   // trained model (see myNewModel) plus .info
+let myStale = false                  // true when classes were added/removed after training
+let myHist = mySensors.map(function(){ return [] })
+let myLastWindow = null
+let myTask = ''                      // '' = idle, otherwise what is running ('record', 'train', 'test')
+let myStop = false                   // set by the Stop button
+let myWaiters = {}                   // message type -> {resolve, reject, timer}
+let myLossHist = [], myAccHist = []
+let mySaveTimer = null
+
+// =====================================================================
+// SMALL HELPERS
+// =====================================================================
+function myEl(id){ return document.getElementById(id) }
+function myYield(){ return new Promise(function(r){ setTimeout(r, 0) }) }
+function mySleep(ms){ return new Promise(function(r){ setTimeout(r, ms) }) }
+function mySay(id, msg, cls){ let e = myEl(id); e.textContent = msg; e.className = cls || 'dim' }
+
+function myLog(msg){
+   let a = myEl('myLogArea')
+   let lines = (a.value + new Date().toLocaleTimeString() + '  ' + msg + '\n').split('\n')
+   if (lines.length > 300) lines = lines.slice(lines.length - 300)
+   a.value = lines.join('\n')
+   a.scrollTop = a.scrollHeight
+}
+
+// draw one or more lines on a canvas. series = [{data, color, min, max}]
+function myDrawLines(canvas, series){
+   let g = canvas.getContext('2d'), W = canvas.width, H = canvas.height
+   g.clearRect(0, 0, W, H)
+   series.forEach(function(s){
+      let d = s.data
+      if (d.length < 2) return
+      let lo = s.min !== undefined ? s.min : Math.min.apply(null, d)
+      let hi = s.max !== undefined ? s.max : Math.max.apply(null, d)
+      if (hi - lo < 1e-9) hi = lo + 1
+      g.beginPath(); g.strokeStyle = s.color; g.lineWidth = 2
+      d.forEach(function(v, i){
+         let x = 1 + i / (d.length - 1) * (W - 2), y = H - 3 - (v - lo) / (hi - lo) * (H - 6)
+         if (i) g.lineTo(x, y); else g.moveTo(x, y)
+      })
+      g.stroke()
+   })
+}
+
+// =====================================================================
+// CONNECTION: one small interface for both transports
+//   myLink.send(text)            send a command
+//   myLink.pushModel(bytes, cb)  send a model package
+//   myLink.close()
+// Incoming data from either transport ends up in myOnMessage(type, data):
+//   L live values   W captured window   R result   T status   E error   A model-chunk ack
+// =====================================================================
+function myOnMessage(type, data){
+   if (type === 'E'){
+      Object.keys(myWaiters).forEach(function(k){ myFailWait(k, new Error(String(data))) })
+      myLog('Nano error: ' + data)
+      return
+   }
+   if (myWaiters[type]){
+      let w = myWaiters[type]
+      clearTimeout(w.timer); delete myWaiters[type]
+      w.resolve(data)
+   }
+   if (type === 'L') myOnLive(data)
+   if (type === 'T') myOnNanoStatus(data)
+   if (type === 'R') myPaintResult(data)
+}
+
+function myWaitFor(type, ms){
+   return new Promise(function(resolve, reject){
+      let timer = setTimeout(function(){ delete myWaiters[type]; reject(new Error('timed out waiting for ' + type)) }, ms)
+      myWaiters[type] = { resolve: resolve, reject: reject, timer: timer }
+   })
+}
+function myFailWait(type, err){
+   let w = myWaiters[type]
+   if (!w) return
+   clearTimeout(w.timer); delete myWaiters[type]
+   w.reject(err)
+}
+
+let myNanoInfo = null                // last STATUS from the Nano {loaded, baked, n, labels}
+
+function myPaintConnect(){
+   let b = myLink && myLink.kind === 'Bluetooth', u = myLink && myLink.kind === 'USB'
+   myEl('myBtnBle').className = b ? 'go' : 'blue'
+   myEl('myBtnSerial').className = u ? 'go' : 'blue'
+   myEl('myBtnBle').textContent = b ? 'Bluetooth connected' : 'Connect Bluetooth'
+   myEl('myBtnSerial').textContent = u ? 'USB connected' : 'Connect USB (Serial)'
+}
+
+// banner at the top: what model is the Nano holding?
+function myPaintTop(){
+   let chips = '', btn = myEl('myTopBtn')
+   if (!myLink){ mySay('myTopStatus', 'Nano: not connected', 'dim'); myEl('myTopClasses').innerHTML = ''; btn.style.display = 'none'; myEl('myTopResult').textContent = ''; return }
+   if (!myNanoInfo){ mySay('myTopStatus', 'Nano: connected, checking for a model...', 'dim'); btn.style.display = 'none'; return }
+   if (!myNanoInfo.loaded){ mySay('myTopStatus', 'Nano: connected, no model loaded yet. Train, then Send model or bake it.', 'warn'); myEl('myTopClasses').innerHTML = ''; btn.style.display = 'none'; return }
+   mySay('myTopStatus', 'Nano: ' + (myNanoInfo.baked ? 'BAKED model found in firmware' : 'model loaded in RAM') + ' - ' + myNanoInfo.n + ' classes', 'ok')
+   myNanoInfo.labels.forEach(function(l, i){ chips += '<span class="chip"><span class="dot" style="background:' + MY_COLORS[i] + '"></span>' + l + '</span>' })
+   myEl('myTopClasses').innerHTML = chips
+   btn.style.display = ''
+}
+
+function myOnConnected(link){
+   myLink = link
+   myNanoInfo = null
+   myPaintConnect(); myPaintTop()
+   mySay('myConnStatus', 'Connected (' + link.kind + '): ' + link.name, 'ok')
+   myLog('connected via ' + link.kind + ' to ' + link.name)
+   setTimeout(myCheckNano, 1200)
+}
+
+function myOnClosed(){
+   myLink = null
+   myNanoInfo = null
+   myPaintConnect(); myPaintTop()
+   myRunTest = false
+   Object.keys(myWaiters).forEach(function(k){ myFailWait(k, new Error('disconnected')) })
+   mySay('myConnStatus', 'not connected', 'dim')
+   myLog('disconnected')
+}
+
+async function myDisconnect(){
+   if (myLink) await myLink.close()
+}
+
+// ---- Bluetooth ----
+async function myConnectBle(){
+   if (!navigator.bluetooth){ mySay('myConnStatus', 'Web Bluetooth is not available here. Use Chrome or Edge.', 'bad'); return }
+   if (myLink) await myLink.close()
+   try {
+      mySay('myConnStatus', 'choose the Nano in the popup...')
+      let dev = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: 'Nano33' }], optionalServices: [MY_SERVICE] })
+      let server = await dev.gatt.connect()
+      let svc = await server.getPrimaryService(MY_SERVICE)
+      let cControl = await svc.getCharacteristic(MY_CHAR_CONTROL)
+      let cLive = await svc.getCharacteristic(MY_CHAR_LIVE)
+      let cBinary = await svc.getCharacteristic(MY_CHAR_BINARY)
+      let cModel = await svc.getCharacteristic(MY_CHAR_MODEL)
+      let cResult = await svc.getCharacteristic(MY_CHAR_RESULT)
+      let dec = new TextDecoder()
+      let rx = { active: false, expect: 0, chunks: [], got: 0, last: 0 }
+
+      cLive.addEventListener('characteristicvaluechanged', function(e){
+         let v = dec.decode(e.target.value).split(',').map(Number)
+         if (v.length >= 17) myOnMessage('L', v)
+      })
+      cResult.addEventListener('characteristicvaluechanged', function(e){
+         let parts = dec.decode(e.target.value).split(',')
+         if (parts[0] === 'R') myOnMessage('R', parts.slice(1).map(Number))
+         else if (parts[0] === 'T') myOnMessage('T', parts.slice(1))
+         else if (parts[0] === 'E') myOnMessage('E', parts.slice(1).join(','))
+      })
+      cBinary.addEventListener('characteristicvaluechanged', function(e){
+         let v = e.target.value
+         if (rx.active && Date.now() - rx.last > 3000) rx.active = false          // stale transfer: start over
+         rx.last = Date.now()
+         if (!rx.active){
+            if (v.byteLength === 4){ rx = { active: true, expect: v.getUint32(0, true), chunks: [], got: 0, last: Date.now() } }
+            return
+         }
+         rx.chunks.push(new Uint8Array(v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength)))
+         rx.got += v.byteLength
+         if (rx.got >= rx.expect){
+            rx.active = false
+            let all = new Uint8Array(rx.got), off = 0
+            rx.chunks.forEach(function(c){ all.set(c, off); off += c.length })
+            if (all.length === MY_WIN * 4) myOnMessage('W', new Float32Array(all.buffer))
+            else myLog('unexpected binary size ' + all.length)
+         }
+      })
+      await cLive.startNotifications()
+      await cResult.startNotifications()
+      await cBinary.startNotifications()
+      dev.addEventListener('gattserverdisconnected', myOnClosed)
+
+      async function write(char, bytes){
+         if (char.writeValueWithResponse) await char.writeValueWithResponse(bytes); else await char.writeValue(bytes)
+      }
+      myOnConnected({
+         kind: 'Bluetooth', name: dev.name,
+         send: function(text){ return write(cControl, new TextEncoder().encode(text)) },
+         pushModel: async function(bytes, progress){
+            let head = new Uint8Array(4); new DataView(head.buffer).setUint32(0, bytes.length, true)
+            await write(cModel, head)
+            for (let off = 0; off < bytes.length; off += 100){
+               await write(cModel, bytes.slice(off, off + 100))
+               progress(Math.min(off + 100, bytes.length) / bytes.length)
+               await mySleep(10)
+            }
+         },
+         close: async function(){ if (dev.gatt.connected) dev.gatt.disconnect() }
+      })
+   } catch (e){
+      mySay('myConnStatus', 'Bluetooth connect failed: ' + e.message, 'bad')
+      myLog('ble error: ' + e)
+   }
+}
+
+// ---- USB serial ----
+async function myConnectSerial(){
+   if (!navigator.serial){ mySay('myConnStatus', 'Web Serial is not available here. Use Chrome or Edge on a computer.', 'bad'); return }
+   if (myLink) await myLink.close()
+   try {
+      let port = await navigator.serial.requestPort()
+      await port.open({ baudRate: 115200 })
+      try { await port.setSignals({ dataTerminalReady: true }) } catch (e) {}
+      let writer = port.writable.getWriter()
+      let reader = port.readable.getReader()
+      let enc = new TextEncoder(), dec = new TextDecoder(), open = true
+
+      async function send(text){ await writer.write(enc.encode(text + '\n')) }
+      let keepAlive = setInterval(function(){ send('LIVE 1').catch(function(){}) }, 5000)   // keeps the live stream on and tells the Nano a computer is here
+
+      async function readLoop(){
+         let buf = ''
+         try {
+            while (open){
+               let r = await reader.read()
+               if (r.done) break
+               buf += dec.decode(r.value, { stream: true })
+               let i
+               while ((i = buf.indexOf('\n')) >= 0){ myOnSerialLine(buf.slice(0, i).trim()); buf = buf.slice(i + 1) }
+            }
+         } catch (e) { myLog('serial read ended: ' + e.message) }
+         clearInterval(keepAlive)
+         if (open){ open = false; try { await port.close() } catch (e) {} }
+         myOnClosed()
+      }
+      readLoop()
+      myOnConnected({
+         kind: 'USB', name: 'serial port',
+         send: send,
+         pushModel: async function(bytes, progress){
+            let p = myWaitFor('A', 3000); await send('MODEL ' + bytes.length); await p
+            for (let off = 0; off < bytes.length; off += 64){
+               let hex = Array.from(bytes.slice(off, off + 64)).map(function(b){ return b.toString(16).padStart(2, '0') }).join('')
+               let a = myWaitFor('A', 3000); await send('H' + hex); await a
+               progress(Math.min(off + 64, bytes.length) / bytes.length)
+            }
+         },
+         close: async function(){
+            open = false; clearInterval(keepAlive)
+            try { await send('LIVE 0') } catch (e) {}
+            try { await reader.cancel() } catch (e) {}
+            try { writer.releaseLock() } catch (e) {}
+            try { await port.close() } catch (e) {}
+         }
+      })
+      send('LIVE 1')
+   } catch (e){
+      mySay('myConnStatus', 'USB connect failed: ' + e.message, 'bad')
+      myLog('serial error: ' + e)
+   }
+}
+
+// lines from the Nano: L,... W,... R,... T,... E,... A,...  everything else is plain text for the log
+function myOnSerialLine(line){
+   if (!line) return
+   let parts = line.split(',')
+   let tag = parts[0]
+   if (tag === 'L') myOnMessage('L', parts.slice(1).map(Number))
+   else if (tag === 'W' && parts.length === MY_WIN + 1) myOnMessage('W', Float32Array.from(parts.slice(1).map(Number)))
+   else if (tag === 'R') myOnMessage('R', parts.slice(1).map(Number))
+   else if (tag === 'T') myOnMessage('T', parts.slice(1))
+   else if (tag === 'E') myOnMessage('E', parts.slice(1).join(','))
+   else if (tag === 'A') myOnMessage('A', Number(parts[1]))
+   else myLog('Nano: ' + line)
+}
+
+// ask the Nano for one 1 second window of every sensor
+async function myCaptureWindow(){
+   if (!myLink) throw new Error('not connected')
+   let p = myWaitFor('W', 8000)
+   await myLink.send('CAPTURE')
+   let w = await p
+   myLastWindow = w
+   myShowWindow(w)
+   return w
+}
+
+// =====================================================================
+// 1. LIVE SENSORS
+// =====================================================================
+function myBuildSensorTiles(){
+   let html = '', group = ''
+   mySensors.forEach(function(s, i){
+      if (s.g !== group){ if (group) html += '</div>'; group = s.g; html += '<h4>' + group + '</h4><div class="grid">' }
+      html += '<div class="tile"><span>' + s.n + (s.u ? ' (' + s.u + ')' : '') + '</span><b id="myV' + i + '">-</b><canvas id="myS' + i + '" width="240" height="34"></canvas></div>'
+   })
+   myEl('mySensorTiles').innerHTML = html + '</div>'
+   let w = ''
+   for (let c = 0; c < MY_FAST; c++) w += '<div class="tile"><span>' + mySensors[c].n + '</span><canvas id="myW' + c + '" width="240" height="34"></canvas></div>'
+   for (let i = 0; i < MY_STATIC; i++) w += '<div class="tile"><span>' + mySensors[MY_FAST + i].n + '</span><b id="myWS' + i + '">-</b></div>'
+   myEl('myWindowTiles').innerHTML = w
+}
+
+function myOnLive(v){
+   for (let i = 0; i < mySensors.length; i++){
+      myHist[i].push(v[i]); if (myHist[i].length > MY_HIST) myHist[i].shift()
+      myEl('myV' + i).textContent = isFinite(v[i]) ? v[i].toFixed(mySensors[i].d) : '-'
+      myDrawLines(myEl('myS' + i), [{ data: myHist[i], color: '#58a6ff' }])
+   }
+}
+
+function myShowWindow(w){
+   for (let c = 0; c < MY_FAST; c++){
+      let d = []
+      for (let t = 0; t < MY_STEPS; t++) d.push(w[t * MY_FAST + c])
+      myDrawLines(myEl('myW' + c), [{ data: d, color: '#f0883e' }])
+   }
+   for (let i = 0; i < MY_STATIC; i++){
+      let v = w[MY_STEPS * MY_FAST + i]
+      myEl('myWS' + i).textContent = isFinite(v) ? v.toFixed(mySensors[MY_FAST + i].d) : '-'
+   }
+}
+
+// =====================================================================
+// 2. CLASSES AND SAMPLES
+// =====================================================================
+function myRenderClasses(){
+   let html = ''
+   myClasses.forEach(function(name, i){
+      html += '<div class="bar"><span class="dot" style="background:' + MY_COLORS[i] + '"></span>' +
+              '<input value="' + name + '" maxlength="12" size="14" onchange="myRename(' + i + ', this.value)">' +
+              '<span class="dim" id="myCount' + i + '"></span>' +
+              '<button class="go" onclick="myRecord(' + i + ')">Record</button>' +
+              '<button onclick="myClearClass(' + i + ')">Clear</button>' +
+              '<button onclick="myRemoveClass(' + i + ')" title="Remove this class">x</button></div>'
+   })
+   myEl('myClassList').innerHTML = html
+   myUpdateCounts()
+}
+
+function myCount(i){ return myDataset.filter(function(s){ return s.c === i }).length }
+
+function myUpdateCounts(){
+   myClasses.forEach(function(n, i){ let e = myEl('myCount' + i); if (e) e.textContent = myCount(i) + ' samples' })
+   myUpdateDeploy()
+}
+
+function myRename(i, v){
+   myClasses[i] = mySafeLabel(v, i)
+   if (myModel && !myStale && myModel.labels.length === myClasses.length) myModel.labels[i] = myClasses[i]   // a rename keeps the trained model valid
+   myRenderClasses(); myAutoSave()
+}
+
+function myAddClass(){
+   if (myClasses.length >= MY_MAX_CLASSES){ mySay('myRecStatus', 'Maximum is ' + MY_MAX_CLASSES + ' classes (one per LED colour).', 'warn'); return }
+   myClasses.push('class' + myClasses.length)
+   if (myModel) myStale = true
+   myRenderClasses(); myAutoSave()
+}
+
+function myRemoveClass(i){
+   if (myClasses.length <= 2){ mySay('myRecStatus', 'You need at least 2 classes.', 'warn'); return }
+   myDataset = myDataset.filter(function(s){ return s.c !== i }).map(function(s){ if (s.c > i) s.c--; return s })
+   myClasses.splice(i, 1)
+   if (myModel) myStale = true
+   myRenderClasses(); myAutoSave()
+}
+
+function myClearClass(i){
+   myDataset = myDataset.filter(function(s){ return s.c !== i })
+   myUpdateCounts(); myAutoSave()
+}
+
+function myClearAll(){
+   if (myDataset.length && !confirm('Delete all ' + myDataset.length + ' samples?')) return
+   myDataset = []
+   myUpdateCounts(); myAutoSave()
+}
+
+async function myRecord(ci){
+   if (myTask){ mySay('myRecStatus', 'Busy: ' + myTask, 'warn'); return }
+   if (!myLink){ mySay('myRecStatus', 'Connect a Nano first (step 0).', 'warn'); return }
+   myTask = 'recording'; myStop = false; myEl('myStopBtn').disabled = false
+   let per = Number(myEl('myPerClick').value), delay = Number(myEl('myDelay').value)
+   try {
+      for (let s = delay; s > 0 && !myStop; s--){ mySay('myRecStatus', 'Get ready for "' + myClasses[ci] + '"... ' + s, 'warn'); await mySleep(1000) }
+      await myLink.send('LED ' + ci)                         // Nano LED shows this class colour while recording
+      for (let k = 0; k < per && !myStop; k++){
+         mySay('myRecStatus', 'Recording "' + myClasses[ci] + '"  ' + (k + 1) + ' / ' + per, 'ok')
+         let w = await myCaptureWindow()
+         myDataset.push({ c: ci, w: w })
+         myUpdateCounts()
+      }
+      mySay('myRecStatus', myStop ? 'Stopped.' : 'Done: ' + per + ' windows added to "' + myClasses[ci] + '".', 'ok')
+   } catch (e){
+      mySay('myRecStatus', 'Capture failed: ' + e.message, 'bad')
+      myLog('capture error: ' + e.message)
+   }
+   if (myLink) myLink.send('LED -1').catch(function(){})
+   myTask = ''; myEl('myStopBtn').disabled = true
+   myAutoSave()
+}
+
+// =====================================================================
+// 3. TRAIN
+// =====================================================================
+async function myTrainClick(){
+   if (myTask){ mySay('myTrainStatus', 'Busy: ' + myTask, 'warn'); return }
+   for (let i = 0; i < myClasses.length; i++){
+      if (myCount(i) === 0){ mySay('myTrainStatus', 'Class "' + myClasses[i] + '" has no samples yet.', 'warn'); return }
+   }
+   myTask = 'training'; myStop = false; myEl('myStopBtn').disabled = false
+   let epochs = Number(myEl('myEpochs').value) || 60, lr = Number(myEl('myLr').value) || 0.01
+   let labels = myClasses.map(function(n, i){ return mySafeLabel(n, i) })
+   let m = myNewModel(myClasses.length, labels)
+   myCalibrate(m, myDataset)
+   let items = myDataset.map(function(s){ return { x: myNormalize(s.w, m), y: s.c } })
+   myLossHist = []; myAccHist = []
+   myLog('training: ' + items.length + ' samples, ' + epochs + ' epochs, lr ' + lr)
+   let r = { loss: 0, acc: 0 }
+   for (let e = 0; e < epochs && !myStop; e++){
+      r = myTrainEpoch(m, items, lr)
+      if (!isFinite(r.loss)){ mySay('myTrainStatus', 'Training went unstable. Lower the learning rate and try again.', 'bad'); myTask = ''; myEl('myStopBtn').disabled = true; return }
+      myLossHist.push(r.loss); myAccHist.push(r.acc)
+      mySay('myTrainStatus', 'Epoch ' + (e + 1) + ' / ' + epochs + '   loss ' + r.loss.toFixed(3) + '   accuracy ' + (r.acc * 100).toFixed(0) + '%')
+      myDrawLines(myEl('myLossChart'), [{ data: myLossHist, color: '#f0883e', min: 0 }, { data: myAccHist, color: '#3fb950', min: 0, max: 1 }])
+      await myYield()
+   }
+   m.info = { samples: items.length, epochs: myLossHist.length, acc: r.acc, when: new Date().toLocaleTimeString() }
+   myModel = m; myStale = false
+   mySay('myTrainStatus', 'Done: ' + myLossHist.length + ' epochs, training accuracy ' + (r.acc * 100).toFixed(0) + '%. Now test it (step 4).', 'ok')
+   myTask = ''; myEl('myStopBtn').disabled = true
+   myUpdateDeploy(); myAutoSave()
+}
+
+// =====================================================================
+// 4. TEST
+// =====================================================================
+let myRunTest = false
+
+function myShowProbs(probs, labels){
+   let html = ''
+   probs.forEach(function(p, i){
+      html += '<div class="prob"><span>' + (labels[i] || 'class' + i) + '</span><div><i style="width:' + (p * 100).toFixed(0) + '%;background:' + MY_COLORS[i] + '"></i></div><b>' + (p * 100).toFixed(0) + '%</b></div>'
+   })
+   myEl('myProbs').innerHTML = html
+}
+
+function myModelReady(id){
+   if (!myModel){ mySay(id, 'Train a model first (step 3).', 'warn'); return false }
+   if (myStale){ mySay(id, 'Classes changed since training. Train again.', 'warn'); return false }
+   return true
+}
+
+function myPaintTestButtons(running){
+   myEl('myBtnTestBrowser').textContent = running === 'browser' ? 'Stop test' : 'Test in browser'
+   myEl('myBtnTestNano').textContent = running === 'nano' ? 'Stop test' : 'Test on Nano'
+   myEl('myTopBtn').textContent = running === 'nano' ? 'Stop watching' : 'Watch what the Nano sees'
+}
+
+async function myToggleTest(mode){
+   if (myRunTest){ myRunTest = false; return }
+   if (myTask){ mySay('myTestStatus', 'Busy: ' + myTask, 'warn'); return }
+   if (!myLink){ mySay('myTestStatus', 'Connect a Nano first (step 0).', 'warn'); return }
+   if (mode === 'browser' && !myModelReady('myTestStatus')) return
+   if (mode === 'nano' && !(myNanoInfo && myNanoInfo.loaded)){ mySay('myTestStatus', 'The Nano has no model yet. Send model to Nano, or bake it. (Press Check Nano to refresh.)', 'warn'); return }
+   myTask = 'testing'; myRunTest = true
+   myPaintTestButtons(mode)
+   mySay('myTestStatus', mode === 'browser' ? 'Running the model in this page on live windows. The Nano LED shows the result.' : 'The Nano is classifying by itself. Its LED shows the result.', 'ok')
+   try {
+      while (myRunTest && myLink){
+         if (mode === 'browser'){
+            let w = await myCaptureWindow()
+            let probs = myForward(myNormalize(w, myModel), myModel).probs
+            myShowProbs(probs, myModel.labels)
+            let best = probs.indexOf(Math.max.apply(null, probs))
+            myPaintResult([best, probs[best]].concat(probs))
+            await myLink.send('LED ' + best)                 // light the Nano LED with the browser's answer
+         } else {
+            let p = myWaitFor('R', 8000)
+            await myLink.send('INFER')
+            let r = await p                                  // [pred, conf, p0, p1, ...]
+            let labels = (myNanoInfo && myNanoInfo.labels.length === r.length - 2) ? myNanoInfo.labels : (myModel ? myModel.labels : [])
+            myShowProbs(r.slice(2), labels)
+         }
+      }
+   } catch (e){
+      mySay('myTestStatus', 'Test stopped: ' + e.message, 'bad')
+   }
+   myRunTest = false; myTask = ''
+   myPaintTestButtons('')
+   if (myLink) myLink.send('LED -1').catch(function(){})
+}
+
+async function myPushModel(){
+   if (myTask){ mySay('myTestStatus', 'Busy: ' + myTask, 'warn'); return }
+   if (!myLink){ mySay('myTestStatus', 'Connect a Nano first (step 0).', 'warn'); return }
+   if (!myModelReady('myTestStatus')) return
+   myTask = 'sending model'
+   try {
+      let bytes = myPackModel(myModel)
+      await myLink.pushModel(bytes, function(f){ mySay('myTestStatus', 'Sending model to Nano... ' + (f * 100).toFixed(0) + '%') })
+      mySay('myTestStatus', 'Model sent (' + bytes.length + ' bytes). It lives in RAM until the Nano reboots.', 'ok')
+      await mySleep(300)
+      myTask = ''
+      myCheckNano()
+   } catch (e){
+      mySay('myTestStatus', 'Send failed: ' + e.message + '. Try Disconnect, Connect, and send again.', 'bad')
+   }
+   myTask = ''
+}
+
+async function myCheckNano(){
+   if (!myLink) { mySay('myNanoStatus', 'Nano model: not connected', 'dim'); return }
+   try { await myLink.send('STATUS') } catch (e){ myLog('status error: ' + e.message) }
+}
+
+// data = ['1','0','3','still|shake|covered']  (loaded, baked, classes, labels)
+function myPaintResult(r){
+   let p = r.slice(2), best = r[0]
+   let labels = (myNanoInfo && myNanoInfo.labels.length === p.length) ? myNanoInfo.labels : (myModel ? myModel.labels : [])
+   myEl('myTopResult').textContent = 'Nano sees: ' + (labels[best] || 'class' + best) + ' ' + ((p[best] || 0) * 100).toFixed(0) + '%'
+}
+
+function myOnNanoStatus(d){
+   myNanoInfo = { loaded: d[0] === '1', baked: d[1] === '1', n: Number(d[2]), labels: (d[3] || '').split('|') }
+   myPaintTop()
+   if (d[0] !== '1'){ mySay('myNanoStatus', 'Nano model: none loaded yet.', 'warn'); return }
+   let labels = (d[3] || '').split('|')
+   let same = myModel && !myStale && labels.join('|') === myModel.labels.join('|')
+   mySay('myNanoStatus', 'Nano model: ' + (d[1] === '1' ? 'BAKED in firmware' : 'loaded in RAM') + ', ' + d[2] + ' classes (' + labels.join(', ') + ')' +
+         (same ? '  - matches this page' : '  - differs from this page'), same ? 'ok' : 'warn')
+}
+
+// =====================================================================
+// 5. BAKE
+// =====================================================================
+function myUpdateDeploy(){
+   let ready = myModel && !myStale
+   myEl('myBtnHeader').disabled = !ready
+   if (!myModel) { mySay('myDeployInfo', 'Train a model first.'); return }
+   if (myStale) { mySay('myDeployInfo', 'Classes changed since training. Train again before baking.', 'warn'); return }
+   let kb = (myPackModel(myModel).length / 1024).toFixed(1)
+   mySay('myDeployInfo', myModel.n + ' classes: ' + myModel.labels.join(', ') + '  |  ' + (myModel.info ? myModel.info.samples + ' samples, accuracy ' + (myModel.info.acc * 100).toFixed(0) + '%, ' : '') + kb + ' KB of weights', 'ok')
+}
+
+function myDownloadHeader(){
+   if (!myModel || myStale) return
+   let a = document.createElement('a')
+   a.href = URL.createObjectURL(new Blob([myMakeHeader(myModel)], { type: 'text/plain' }))
+   a.download = 'myNanoModel.h'
+   document.body.appendChild(a); a.click(); document.body.removeChild(a)
+   myLog('downloaded myNanoModel.h for classes: ' + myModel.labels.join(', '))
+}
+
+// =====================================================================
+// SAVE / LOAD (browser autosave + project file)
+// =====================================================================
+const myModelKeys = ['conv1_w', 'conv1_b', 'dense1_w', 'dense1_b', 'dense2_w', 'dense2_b', 'output_w', 'output_b', 'calibMean', 'calibStd']
+
+function myProjectObject(){
+   let o = { v: 1, classes: myClasses, stale: myStale,
+             samples: myDataset.map(function(s){ return { c: s.c, w: Array.from(s.w, function(x){ return Number(x.toFixed(4)) }) } }), model: null }
+   if (myModel){
+      o.model = { n: myModel.n, labels: myModel.labels, info: myModel.info }
+      myModelKeys.forEach(function(k){ o.model[k] = Array.from(myModel[k], function(x){ return Number(x.toPrecision(9)) }) })
+   }
+   return o
+}
+
+function myApplyProject(o){
+   myClasses = o.classes.slice(0, MY_MAX_CLASSES)
+   myDataset = o.samples.map(function(s){ return { c: s.c, w: Float32Array.from(s.w) } })
+   myStale = !!o.stale
+   myModel = null
+   if (o.model){
+      myModel = { n: o.model.n, labels: o.model.labels, info: o.model.info }
+      myModelKeys.forEach(function(k){ myModel[k] = Float32Array.from(o.model[k]) })
+   }
+}
+
+function myAutoSave(){
+   clearTimeout(mySaveTimer)
+   mySaveTimer = setTimeout(function(){
+      try { localStorage.setItem(MY_STORE_KEY, JSON.stringify(myProjectObject())) }
+      catch (e){ myLog('autosave failed (storage full?). Use Save project (.json).') }
+   }, 400)
+}
+
+function mySaveProject(){
+   let a = document.createElement('a')
+   a.href = URL.createObjectURL(new Blob([JSON.stringify(myProjectObject())], { type: 'application/json' }))
+   a.download = 'nano33-project.json'
+   document.body.appendChild(a); a.click(); document.body.removeChild(a)
+}
+
+function myLoadProject(ev){
+   let f = ev.target.files[0]
+   if (!f) return
+   let r = new FileReader()
+   r.onload = function(){
+      try { myApplyProject(JSON.parse(r.result)); myRenderClasses(); myAutoSave(); mySay('myRecStatus', 'Project loaded: ' + myDataset.length + ' samples.', 'ok') }
+      catch (e){ mySay('myRecStatus', 'Could not read that project file.', 'bad') }
+   }
+   r.readAsText(f)
+   ev.target.value = ''
+}
+
+// =====================================================================
+// START
+// =====================================================================
+myBuildSensorTiles()
+try { let saved = localStorage.getItem(MY_STORE_KEY); if (saved) myApplyProject(JSON.parse(saved)) } catch (e) { myLog('no saved project loaded') }
+myRenderClasses()
+if (!navigator.bluetooth) myEl('myBtnBle').disabled = true
+if (!navigator.serial) myEl('myBtnSerial').disabled = true
+if (!navigator.bluetooth && !navigator.serial) mySay('myConnStatus', 'This browser has neither Web Bluetooth nor Web Serial. Use Chrome or Edge.', 'bad')
+</script>
+</body>
+</html>
