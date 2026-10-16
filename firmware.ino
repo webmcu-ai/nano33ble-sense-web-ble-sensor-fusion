@@ -1,6 +1,6 @@
 // ======================================================
 // ARDUINO NANO 33 BLE SENSE - SENSOR FUSION TRAINER - v01
-// (nano33-ble-trainer)
+// (nano33-ble-trainer-v006)
 //
 // ONE board, no SD card, no second MCU. The web page (index.html)
 // does all the collecting and training over Web Bluetooth OR Web Serial
@@ -9,9 +9,11 @@
 // the finished model baked into its code. No file needed on the board.
 //
 // What this sketch does:
-//   - Samples every onboard sensor into one fused window:
-//       accel(3) gyro(3) mag(3) mic(1)  x 40 timesteps  = 400 floats
-//       pressure temp humidity proximity colorR colorG colorB = 7 floats
+//   - Samples every onboard sensor into one fused window of 17 channels x 40 steps:
+//       accel(3) gyro(3) mag(3) mic(1) pressure temp humidity prox colorR colorG colorB
+//     (slow sensors are re-read every few steps and held in between)
+//   - Every channel has an "effect" 0..1 set in the web page (0 = ignore that sense,
+//     1 = full). It is baked into myNanoModel.h along with the weights.
 //   - Streams all 17 live sensor values (BLE heartbeat or USB "L," lines)
 //   - Sends a captured window to the page (for training)
 //   - Receives a model from the page (BLE or USB) for quick testing
@@ -28,8 +30,9 @@
 //   A model pushed later from the page simply replaces the baked one in
 //   RAM until the next reboot.
 //
-// Arduino IDE libraries (Library Manager): ArduinoBLE, Arduino_LSM9DS1,
-// Arduino_APDS9960, Arduino_LPS22HB, Arduino_HTS221, plus PDM (built in).
+// Arduino IDE libraries (Library Manager): ArduinoBLE, Arduino_APDS9960,
+// Arduino_LPS22HB, plus PDM (built in). Rev1: Arduino_LSM9DS1 + Arduino_HTS221.
+// Rev2: Arduino_BMI270_BMM150 + Arduino_HS300x (set MY_NANO_REV below).
 // Board: "Arduino Nano 33 BLE" from the Arduino Mbed OS Nano Boards core.
 //
 // FILE LAYOUT RULE: every variable is declared at the top of this file and
@@ -41,11 +44,28 @@
 // ======================================================
 
 #include <PDM.h>
-#include <Arduino_LSM9DS1.h>
 #include <Arduino_APDS9960.h>
 #include <Arduino_LPS22HB.h>
-#include <Arduino_HTS221.h>
 #include <ArduinoBLE.h>
+
+// ======================================================
+// BOARD REVISION: change this ONE number.
+//   1 = original Nano 33 BLE Sense  (LSM9DS1 IMU, HTS221 temp/humidity)
+//   2 = Nano 33 BLE Sense Rev2      (BMI270+BMM150 IMU, HS300x temp/humidity)
+// Rev2 needs the libraries Arduino_BMI270_BMM150 and Arduino_HS300x.
+// A model trained on one revision is only approximate on the other
+// (different sensor chips, magnetometer axes), so train on the board you deploy on.
+// ======================================================
+#define MY_NANO_REV 1
+
+#if MY_NANO_REV == 2
+  #include <Arduino_BMI270_BMM150.h>
+  #include <Arduino_HS300x.h>
+  #define HTS HS300x               // lets the rest of this sketch use HTS.readTemperature() on both revisions
+#else
+  #include <Arduino_LSM9DS1.h>
+  #include <Arduino_HTS221.h>
+#endif
 
 // ======================================================
 // PART 1: SETTINGS (defines only, no variables)
@@ -69,17 +89,15 @@
 #define MY_AUTORUN_GAP_MS        200    // pause between autorun inferences
 
 #define IMU_TIMESTEPS         40
-#define FAST_CHANNELS         10        // ax,ay,az,gx,gy,gz,mx,my,mz,mic
-#define STATIC_FEATURES        7        // pressure,temp,humidity,prox,r,g,b
+#define CHANNELS              17        // ax ay az gx gy gz mx my mz mic pressure temp humidity prox r g b
 #define SAMPLE_INTERVAL_MS    25        // 40 Hz -> 40 steps = 1 second
-#define LIVE_VALUES           (FAST_CHANNELS + STATIC_FEATURES)   // 17
+#define LIVE_VALUES           CHANNELS
 
-#define FAST_SIZE     (IMU_TIMESTEPS * FAST_CHANNELS)             // 400
-#define PACKET_FLOATS (FAST_SIZE + STATIC_FEATURES)               // 407
-#define PACKET_BYTES  (PACKET_FLOATS * 4)                         // 1628
+#define PACKET_FLOATS (IMU_TIMESTEPS * CHANNELS)                  // 680
+#define PACKET_BYTES  (PACKET_FLOATS * 4)                         // 2720
 
 // ---- network architecture - MUST match index.html exactly ----
-//   Conv1D(k=5,f=8) -> MaxPool/2 -> flatten(144) ++ static(7) = 151
+//   Conv1D(k=5, 17 channels -> 8 filters) -> MaxPool/2 -> flatten(144)
 //   -> Dense(32) -> Dense(16) -> Output(N classes, softmax)
 #define MY_MAX_CLASSES         7        // 7 = number of LED colours (R,G,B,Y,C,M,W)
 #define MY_LABEL_LEN          13        // 12 characters + NUL
@@ -88,37 +106,26 @@
 #define CONV1_OUT_STEPS       (IMU_TIMESTEPS - CONV1_KERNEL + 1)  // 36
 #define POOL1_STEPS           (CONV1_OUT_STEPS / 2)               // 18
 #define CONV1_FLAT            (POOL1_STEPS * CONV1_FILTERS)       // 144
-#define COMBINED_SIZE         (CONV1_FLAT + STATIC_FEATURES)      // 151
-#define CONV1_WEIGHTS         (CONV1_KERNEL * FAST_CHANNELS * CONV1_FILTERS)   // 400
+#define COMBINED_SIZE         CONV1_FLAT                          // 144
+#define CONV1_WEIGHTS         (CONV1_KERNEL * CHANNELS * CONV1_FILTERS)   // 680
 #define DENSE1_SIZE           32
 #define DENSE2_SIZE           16
-#define DENSE1_WEIGHTS        (COMBINED_SIZE * DENSE1_SIZE)       // 4832
+#define DENSE1_WEIGHTS        (COMBINED_SIZE * DENSE1_SIZE)       // 4608
 #define DENSE2_WEIGHTS        (DENSE1_SIZE * DENSE2_SIZE)         // 512
 #define OUTPUT_WEIGHTS_MAX    (DENSE2_SIZE * MY_MAX_CLASSES)      // 112
 
 // Model package (page -> Nano), float32 little endian, then label text:
-//   [numClasses] conv1_w(400) conv1_b(8) dense1_w(4832) dense1_b(32)
+//   [numClasses] conv1_w(680) conv1_b(8) dense1_w(4608) dense1_b(32)
 //   dense2_w(512) dense2_b(16) output_w(16*N) output_b(N)
-//   calibMean(10) calibStd(10)   then   "label0|label1|...|labelN-1"
+//   calibMean(17) calibStd(17) effect(17)   then   "label0|label1|...|labelN-1"
 #define MY_LABEL_REGION_BYTES  (MY_MAX_CLASSES * MY_LABEL_LEN + 4)
 #define MY_MODEL_MAX_FLOATS    (1 + CONV1_WEIGHTS + CONV1_FILTERS + DENSE1_WEIGHTS + DENSE1_SIZE + \
                                 DENSE2_WEIGHTS + DENSE2_SIZE + OUTPUT_WEIGHTS_MAX + MY_MAX_CLASSES + \
-                                FAST_CHANNELS + FAST_CHANNELS)
+                                3 * CHANNELS)
 #define MY_MODEL_MAX_BYTES     (MY_MODEL_MAX_FLOATS * 4 + MY_LABEL_REGION_BYTES)
 
-// Fixed (not learned) static-feature scaling - MUST match index.html.
-// APDS9960 colour counts reach roughly 3000, so colour is divided by 1000.
-#define MY_PRESSURE_BASELINE  101.0f
-#define MY_PRESSURE_SCALE       5.0f
-#define MY_TEMP_BASELINE       20.0f
-#define MY_TEMP_SCALE          10.0f
-#define MY_HUMIDITY_BASELINE   50.0f
-#define MY_HUMIDITY_SCALE      25.0f
-#define MY_PROX_SCALE         255.0f
-#define MY_COLOR_SCALE       1000.0f
-
 #define MY_LINE_MAX          200        // longest USB command line
-#define MY_SERIAL_HEX_BYTES   64        // model bytes per "H" line from the page
+#define MY_SERIAL_HEX_BYTES   64        // most model bytes accepted in one "H" line (the page sends 24 so lines stay short)
 
 // ======================================================
 // BAKED MODEL: auto-detected. Drop myNanoModel.h next to this file.
@@ -132,13 +139,19 @@
 
 #ifdef USE_BAKED_WEIGHTS
   #include "myNanoModel.h"
+  // The header carries a format number. Anything made by an older page has none (or a different one).
+  #if !defined(MY_MODEL_FORMAT) || (MY_MODEL_FORMAT != 4)
+    #error "myNanoModel.h was made by an older web page. Open index-v006.html, train again, download a NEW myNanoModel.h and replace the one in this sketch folder (or delete it to run without a baked model)."
+  #endif
   // If any of these fail, the header was made for a different network: re-download it from the page.
   static_assert(MY_BAKED_NUM_CLASSES >= 1 && MY_BAKED_NUM_CLASSES <= MY_MAX_CLASSES, "myNanoModel.h: class count must be 1..7");
   static_assert(sizeof(myModel_conv1_w)  / sizeof(float) == CONV1_WEIGHTS,  "myNanoModel.h: conv1_w size mismatch");
   static_assert(sizeof(myModel_dense1_w) / sizeof(float) == DENSE1_WEIGHTS, "myNanoModel.h: dense1_w size mismatch");
   static_assert(sizeof(myModel_dense2_w) / sizeof(float) == DENSE2_WEIGHTS, "myNanoModel.h: dense2_w size mismatch");
   static_assert(sizeof(myModel_output_w) / sizeof(float) == DENSE2_SIZE * MY_BAKED_NUM_CLASSES, "myNanoModel.h: output_w size mismatch");
-  static_assert(sizeof(myModel_calibMean) / sizeof(float) == FAST_CHANNELS, "myNanoModel.h: calibMean size mismatch");
+  static_assert(sizeof(myModel_calibMean) / sizeof(float) == CHANNELS, "myNanoModel.h: calibMean size mismatch");
+  static_assert(sizeof(myModel_calibStd)  / sizeof(float) == CHANNELS, "myNanoModel.h: calibStd size mismatch");
+  static_assert(sizeof(myModel_effect)    / sizeof(float) == CHANNELS, "myNanoModel.h: effect size mismatch");
 #endif
 
 // ======================================================
@@ -170,8 +183,9 @@ float myDense2_w[DENSE2_WEIGHTS];
 float myDense2_b[DENSE2_SIZE];
 float myOutput_w[OUTPUT_WEIGHTS_MAX];
 float myOutput_b[MY_MAX_CLASSES];
-float myCalibMean[FAST_CHANNELS];
-float myCalibStd[FAST_CHANNELS];
+float myCalibMean[CHANNELS];
+float myCalibStd[CHANNELS];
+float myEffect[CHANNELS];        // per-sense effect 0..1 (0 = ignore this sense)
 int   myNumClasses = 0;
 bool  myModelLoaded = false;
 bool  myModelIsBaked = false;
@@ -192,6 +206,8 @@ volatile bool          myModelRxActive = false;
 volatile uint32_t      myModelRxTotal = 0;
 volatile uint32_t      myModelRxGot = 0;
 volatile unsigned long myModelRxLastByteMs = 0;
+bool                   myModelRxHasSum = false;   // USB transfers carry a checksum, BLE ones do not
+uint32_t               myModelRxSum = 0;
 
 // ---- requests and state ----
 volatile bool myPendingCapture = false;
@@ -214,7 +230,7 @@ int  myLineLen = 0;
 void  onPDMdata();
 void  myUpdateMic();
 void  myUpdateFast();
-void  myUpdateStatic();
+void  myUpdateSlow(bool env, bool optical);
 void  mySampleWindow();
 int   myBuildLiveText(char* out, int cap);
 void  mySendText(const char* text);
@@ -233,8 +249,9 @@ int   myRunInference(const float* rawWindow);
 void  mySetLed(int cls);
 void  myLoadBakedModel();
 void  myModelRxBegin(uint32_t total);
-void  myModelRxAppend(const uint8_t* data, int len);
-void  myUnpackModel();
+int   myModelRxAppend(const uint8_t* data, int len);
+uint32_t myAdler32(const uint8_t* data, uint32_t n);
+bool  myUnpackModel();
 void  myOnModelWrite(BLEDevice central, BLECharacteristic characteristic);
 void  myOnControlWrite(BLEDevice central, BLECharacteristic characteristic);
 void  myCheckModelRxWatchdog();
@@ -256,7 +273,7 @@ void setup() {
   unsigned long t0 = millis();
   while (!Serial && millis() - t0 < 1500) { /* wait briefly, never hang */ }
 
-  Serial.println("\n=== Nano 33 BLE Sense - Sensor Fusion Trainer v01 ===");
+  Serial.println("\n=== Nano 33 BLE Sense - Sensor Fusion Trainer v006 ===");
 
   pinMode(LEDR, OUTPUT);
   pinMode(LEDG, OUTPUT);
@@ -265,13 +282,14 @@ void setup() {
 
   for (int i = 0; i < LIVE_VALUES; i++) myLatest[i] = 0;
   myLatest[2] = 1.0f;   // az starts at 1 g
+  for (int i = 0; i < CHANNELS; i++) myEffect[i] = 1.0f;
 
   PDM.onReceive(onPDMdata);
   if (!PDM.begin(1, 16000)) Serial.println("ERROR: PDM microphone failed");
-  if (!IMU.begin())   Serial.println("ERROR: LSM9DS1 IMU failed");   else Serial.println("IMU (LSM9DS1) OK");
+  if (!IMU.begin())   Serial.println("ERROR: IMU failed");           else Serial.println("IMU OK");
   if (!APDS.begin())  Serial.println("ERROR: APDS9960 failed");      else Serial.println("APDS9960 OK");
   if (!BARO.begin())  Serial.println("ERROR: LPS22HB failed");       else Serial.println("LPS22HB OK");
-  if (!HTS.begin())   Serial.println("ERROR: HTS221 failed");        else Serial.println("HTS221 OK");
+  if (!HTS.begin())   Serial.println("ERROR: temp/humidity sensor failed"); else Serial.println("Temp/humidity OK");
 
   if (!BLE.begin()) {
     Serial.println("FATAL: BLE failed to start");
@@ -342,35 +360,39 @@ void myUpdateFast() {
   myLatest[9] = myMicLevel;
 }
 
-// slow sensors: pressure, temp, humidity, proximity, colour -> myLatest[10..16]
-// APDS9960 only gives fresh data on every second call, so the last value is kept.
-void myUpdateStatic() {
-  myLatest[10] = BARO.readPressure();      // kPa
-  myLatest[11] = HTS.readTemperature();    // C
-  myLatest[12] = HTS.readHumidity();       // %
-  if (APDS.proximityAvailable()) {
-    int p = APDS.readProximity();          // 0 = near ... 255 = far
-    if (p >= 0) myLatest[13] = (float)p;
+// slow sensors -> myLatest[10..16]. Pressure is read every call; temperature/humidity
+// (env) and proximity/colour (optical) only when asked, otherwise the last value is held.
+// APDS9960 only gives fresh data every second call, so its last value is kept too.
+void myUpdateSlow(bool env, bool optical) {
+  myLatest[10] = BARO.readPressure();          // kPa
+  if (env) {
+    myLatest[11] = HTS.readTemperature();      // C
+    myLatest[12] = HTS.readHumidity();         // %
   }
-  if (APDS.colorAvailable()) {
-    int r, g, b;
-    if (APDS.readColor(r, g, b) && r >= 0) { myLatest[14] = (float)r; myLatest[15] = (float)g; myLatest[16] = (float)b; }
+  if (optical) {
+    if (APDS.proximityAvailable()) {
+      int p = APDS.readProximity();            // 0 = near ... 255 = far
+      if (p >= 0) myLatest[13] = (float)p;
+    }
+    if (APDS.colorAvailable()) {
+      int r, g, b;
+      if (APDS.readColor(r, g, b) && r >= 0) { myLatest[14] = (float)r; myLatest[15] = (float)g; myLatest[16] = (float)b; }
+    }
   }
 }
 
-// one fused window: 40 steps x 25 ms = 1 second
+// one fused window: 40 steps x 25 ms = 1 second, all 17 channels every step
 void mySampleWindow() {
   myBusy = true;
   for (int t = 0; t < IMU_TIMESTEPS; t++) {
     unsigned long tStart = millis();
     BLE.poll();
-    if (t % 10 == 0 || t == IMU_TIMESTEPS - 1) myUpdateStatic();
+    myUpdateSlow(t % 10 == 0, t % 5 == 0);
     myUpdateFast();
-    memcpy(myWindow + t * FAST_CHANNELS, myLatest, FAST_CHANNELS * sizeof(float));
+    memcpy(myWindow + t * CHANNELS, myLatest, CHANNELS * sizeof(float));
     long elapsed = (long)(millis() - tStart);
     if (elapsed < SAMPLE_INTERVAL_MS) delay(SAMPLE_INTERVAL_MS - elapsed);
   }
-  memcpy(myWindow + FAST_SIZE, myLatest + FAST_CHANNELS, STATIC_FEATURES * sizeof(float));
   myBusy = false;
 }
 
@@ -488,21 +510,14 @@ void mySoftmax(float* x, int size) {
   for (int i = 0; i < size; i++) x[i] /= sum;
 }
 
-// buf = PACKET_FLOATS long, normalized in place
+// buf = PACKET_FLOATS long, normalized in place: standardize, clip, then scale by the sense's effect
 void myNormalizeWindow(float* buf) {
   for (int t = 0; t < IMU_TIMESTEPS; t++) {
-    for (int c = 0; c < FAST_CHANNELS; c++) {
-      int idx = t * FAST_CHANNELS + c;
-      buf[idx] = myClip((buf[idx] - myCalibMean[c]) / (myCalibStd[c] + 1e-8f), -5.0f, 5.0f);
+    for (int c = 0; c < CHANNELS; c++) {
+      int idx = t * CHANNELS + c;
+      buf[idx] = myClip((buf[idx] - myCalibMean[c]) / (myCalibStd[c] + 1e-8f), -5.0f, 5.0f) * myEffect[c];
     }
   }
-  buf[FAST_SIZE + 0] = myClip((buf[FAST_SIZE + 0] - MY_PRESSURE_BASELINE) / MY_PRESSURE_SCALE, -5.0f, 5.0f);
-  buf[FAST_SIZE + 1] = myClip((buf[FAST_SIZE + 1] - MY_TEMP_BASELINE)     / MY_TEMP_SCALE,     -5.0f, 5.0f);
-  buf[FAST_SIZE + 2] = myClip((buf[FAST_SIZE + 2] - MY_HUMIDITY_BASELINE) / MY_HUMIDITY_SCALE, -5.0f, 5.0f);
-  buf[FAST_SIZE + 3] = myClip(buf[FAST_SIZE + 3] / MY_PROX_SCALE,  0.0f, 5.0f);
-  buf[FAST_SIZE + 4] = myClip(buf[FAST_SIZE + 4] / MY_COLOR_SCALE, 0.0f, 5.0f);
-  buf[FAST_SIZE + 5] = myClip(buf[FAST_SIZE + 5] / MY_COLOR_SCALE, 0.0f, 5.0f);
-  buf[FAST_SIZE + 6] = myClip(buf[FAST_SIZE + 6] / MY_COLOR_SCALE, 0.0f, 5.0f);
 }
 
 void myForwardPass(float* normalizedWindow) {
@@ -510,9 +525,9 @@ void myForwardPass(float* normalizedWindow) {
     for (int f = 0; f < CONV1_FILTERS; f++) {
       float sum = myConv1_b[f];
       for (int k = 0; k < CONV1_KERNEL; k++) {
-        for (int c = 0; c < FAST_CHANNELS; c++) {
-          sum += normalizedWindow[(s + k) * FAST_CHANNELS + c] *
-                 myConv1_w[(k * FAST_CHANNELS + c) * CONV1_FILTERS + f];
+        for (int c = 0; c < CHANNELS; c++) {
+          sum += normalizedWindow[(s + k) * CHANNELS + c] *
+                 myConv1_w[(k * CHANNELS + c) * CONV1_FILTERS + f];
         }
       }
       myConv1_output[s * CONV1_FILTERS + f] = myLeakyRelu(sum);
@@ -525,8 +540,7 @@ void myForwardPass(float* normalizedWindow) {
       myPool1_output[s * CONV1_FILTERS + f] = a > b ? a : b;
     }
   }
-  memcpy(myCombined, myPool1_output, CONV1_FLAT * sizeof(float));                        // flatten ++ static
-  memcpy(myCombined + CONV1_FLAT, normalizedWindow + FAST_SIZE, STATIC_FEATURES * sizeof(float));
+  memcpy(myCombined, myPool1_output, CONV1_FLAT * sizeof(float));                        // flatten
   for (int j = 0; j < DENSE1_SIZE; j++) {                // Dense1
     float sum = myDense1_b[j];
     for (int i = 0; i < COMBINED_SIZE; i++) sum += myCombined[i] * myDense1_w[i * DENSE1_SIZE + j];
@@ -579,8 +593,9 @@ void myLoadBakedModel() {
     memcpy(myDense2_b, myModel_dense2_b, DENSE2_SIZE    * sizeof(float));
     memcpy(myOutput_w, myModel_output_w, DENSE2_SIZE * MY_BAKED_NUM_CLASSES * sizeof(float));
     memcpy(myOutput_b, myModel_output_b, MY_BAKED_NUM_CLASSES * sizeof(float));
-    memcpy(myCalibMean, myModel_calibMean, FAST_CHANNELS * sizeof(float));
-    memcpy(myCalibStd,  myModel_calibStd,  FAST_CHANNELS * sizeof(float));
+    memcpy(myCalibMean, myModel_calibMean, CHANNELS * sizeof(float));
+    memcpy(myCalibStd,  myModel_calibStd,  CHANNELS * sizeof(float));
+    memcpy(myEffect,    myModel_effect,    CHANNELS * sizeof(float));
     myNumClasses = MY_BAKED_NUM_CLASSES;
     for (int i = 0; i < myNumClasses; i++) {
       strncpy(myLabels[i], myModel_labels[i], MY_LABEL_LEN - 1);
@@ -603,6 +618,7 @@ void myModelRxBegin(uint32_t total) {
   }
   myModelRxTotal = total;
   myModelRxGot = 0;
+  myModelRxHasSum = false;
   myModelRxActive = true;
   myModelRxLastByteMs = millis();
   Serial.print("Model receive starting, ");
@@ -610,21 +626,32 @@ void myModelRxBegin(uint32_t total) {
   Serial.println(" bytes");
 }
 
-void myModelRxAppend(const uint8_t* data, int len) {
-  if (!myModelRxActive) return;
+uint32_t myAdler32(const uint8_t* data, uint32_t n) {
+  uint32_t a = 1, b = 0;
+  for (uint32_t i = 0; i < n; i++) { a = (a + data[i]) % 65521; b = (b + a) % 65521; }
+  return (b << 16) | a;
+}
+
+// returns 0 = more expected, 1 = finished and loaded, -1 = failed (an error was already reported)
+int myModelRxAppend(const uint8_t* data, int len) {
+  if (!myModelRxActive) return -1;
   uint32_t room = myModelRxTotal - myModelRxGot;
   uint32_t n = min((uint32_t)len, room);
   memcpy(myModelRxBuf + myModelRxGot, data, n);
   myModelRxGot += n;
   myModelRxLastByteMs = millis();
-  if (myModelRxGot >= myModelRxTotal) {
-    myModelRxActive = false;
-    Serial.println("Model received - unpacking...");
-    myUnpackModel();
+  if (myModelRxGot < myModelRxTotal) return 0;
+  myModelRxActive = false;
+  if (myModelRxHasSum && myAdler32(myModelRxBuf, myModelRxTotal) != myModelRxSum) {
+    Serial.println("ERROR: model checksum mismatch - bytes were damaged on the USB link");
+    mySendText("E,model checksum mismatch");
+    return -1;
   }
+  Serial.println("Model received - unpacking...");
+  return myUnpackModel() ? 1 : -1;
 }
 
-void myUnpackModel() {
+bool myUnpackModel() {
   float* f = (float*)myModelRxBuf;
   int idx = 0;
   int n = (int)(f[idx++] + 0.5f);
@@ -632,14 +659,14 @@ void myUnpackModel() {
     Serial.print("ERROR: model class count out of range: ");
     Serial.println(n);
     mySendText("E,bad model");
-    return;
+    return false;
   }
   uint32_t floatCount = 1 + CONV1_WEIGHTS + CONV1_FILTERS + DENSE1_WEIGHTS + DENSE1_SIZE +
-                        DENSE2_WEIGHTS + DENSE2_SIZE + DENSE2_SIZE * n + n + FAST_CHANNELS + FAST_CHANNELS;
+                        DENSE2_WEIGHTS + DENSE2_SIZE + DENSE2_SIZE * n + n + 3 * CHANNELS;
   if (myModelRxTotal < floatCount * 4) {
     Serial.println("ERROR: model package shorter than expected");
     mySendText("E,bad model");
-    return;
+    return false;
   }
   memcpy(myConv1_w,  f + idx, CONV1_WEIGHTS  * 4); idx += CONV1_WEIGHTS;
   memcpy(myConv1_b,  f + idx, CONV1_FILTERS  * 4); idx += CONV1_FILTERS;
@@ -649,8 +676,9 @@ void myUnpackModel() {
   memcpy(myDense2_b, f + idx, DENSE2_SIZE    * 4); idx += DENSE2_SIZE;
   memcpy(myOutput_w, f + idx, DENSE2_SIZE * n * 4); idx += DENSE2_SIZE * n;
   memcpy(myOutput_b, f + idx, n * 4);               idx += n;
-  memcpy(myCalibMean, f + idx, FAST_CHANNELS * 4);  idx += FAST_CHANNELS;
-  memcpy(myCalibStd,  f + idx, FAST_CHANNELS * 4);  idx += FAST_CHANNELS;
+  memcpy(myCalibMean, f + idx, CHANNELS * 4);  idx += CHANNELS;
+  memcpy(myCalibStd,  f + idx, CHANNELS * 4);  idx += CHANNELS;
+  memcpy(myEffect,    f + idx, CHANNELS * 4);  idx += CHANNELS;
   myNumClasses = n;
 
   // labels: "a|b|c" after the floats
@@ -671,6 +699,8 @@ void myUnpackModel() {
   Serial.print("Model loaded from page: ");
   Serial.print(myNumClasses);
   Serial.println(" classes (RAM only - baking makes it permanent).");
+  myPendingStatus = true;   // tell the page right away: the new model is already live, no reboot needed
+  return true;
 }
 
 // BLE model write: first packet = 4-byte length, then chunks
@@ -708,6 +738,7 @@ void myOnControlWrite(BLEDevice central, BLECharacteristic characteristic) {
   if      (strncmp(buf, "CAPTURE", 7) == 0) myPendingCapture = true;
   else if (strncmp(buf, "INFER", 5) == 0)   myPendingInfer = true;
   else if (strncmp(buf, "STATUS", 6) == 0)  myPendingStatus = true;
+  else if (strncmp(buf, "LED ", 4) == 0)    mySetLed(atoi(buf + 4));
 }
 
 void myCheckBleConnection() {
@@ -734,16 +765,35 @@ int myHexVal(char c) {
   return 0;
 }
 
-// "H" + hex text from the page: model bytes over USB, answered with "A,bytesSoFar"
-void myHandleHexChunk(const char* hex) {
+// "H<offset>,<hex>,<sum>" from the page: model bytes over USB (sum = the chunk's bytes added up).
+// Always answered with "A,<bytes received so far>". If the offset is not where we are, or the line is
+// short or damaged (sum does not match), nothing is added and the answer tells the page where to resume.
+void myHandleHexChunk(const char* arg) {
   if (!myModelRxActive) { Serial.println("E,no model transfer in progress"); return; }
-  uint8_t tmp[MY_SERIAL_HEX_BYTES + 8];
+  char* comma = NULL;
+  uint32_t off = strtoul(arg, &comma, 10);
+  const char* hex = (comma && *comma == ',') ? comma + 1 : NULL;
+  const char* comma2 = hex ? strchr(hex, ',') : NULL;
+  int hexLen = comma2 ? (int)(comma2 - hex) : 0;
+  bool ok = (comma2 != NULL) && off == myModelRxGot && hexLen > 0 && (hexLen % 2) == 0 && hexLen / 2 <= MY_SERIAL_HEX_BYTES;
+  uint8_t tmp[MY_SERIAL_HEX_BYTES];
   int n = 0;
-  while (hex[0] && hex[1] && n < (int)sizeof(tmp)) {
-    tmp[n++] = (uint8_t)((myHexVal(hex[0]) << 4) | myHexVal(hex[1]));
-    hex += 2;
+  if (ok) {
+    uint32_t sum = 0;
+    for (int i = 0; i < hexLen; i += 2) {
+      tmp[n] = (uint8_t)((myHexVal(hex[i]) << 4) | myHexVal(hex[i + 1]));
+      sum += tmp[n];
+      n++;
+    }
+    if (sum != (uint32_t)strtoul(comma2 + 1, NULL, 10)) ok = false;
   }
-  myModelRxAppend(tmp, n);
+  if (!ok) {
+    Serial.print("A,");
+    Serial.println(myModelRxGot);
+    return;
+  }
+  int status = myModelRxAppend(tmp, n);
+  if (status == -1) return;     // failure already reported with an E line
   Serial.print("A,");
   Serial.println(myModelRxGot);
 }
@@ -759,8 +809,12 @@ void myHandleLine(char* line) {
   else if (strcmp(line, "STATUS") == 0)        myPendingStatus = true;
   else if (strcmp(line, "LIVE 1") == 0)        myLiveSerial = true;
   else if (strcmp(line, "LIVE 0") == 0)        myLiveSerial = false;
-  else if (strncmp(line, "MODEL ", 6) == 0) {
-    myModelRxBegin((uint32_t)strtoul(line + 6, NULL, 10));
+  else if (strncmp(line, "LED ", 4) == 0)      mySetLed(atoi(line + 4));   // page shows a class colour (-1 = off)
+  else if (strncmp(line, "MODEL ", 6) == 0) {              // "MODEL <bytes> <checksum>"
+    char* endp = NULL;
+    uint32_t total = (uint32_t)strtoul(line + 6, &endp, 10);
+    myModelRxBegin(total);
+    if (myModelRxActive && endp && *endp == ' ') { myModelRxSum = (uint32_t)strtoul(endp + 1, NULL, 10); myModelRxHasSum = true; }
     Serial.println("A,0");
   }
   else if (strcmp(line, "HELP") == 0 || strcmp(line, "?") == 0) myPrintHelp();
@@ -783,7 +837,7 @@ void myReadSerial() {
 }
 
 void myPrintHelp() {
-  Serial.println("Commands (end with Enter): CAPTURE, INFER, STATUS, LIVE 1, LIVE 0, HELP");
+  Serial.println("Commands (end with Enter): CAPTURE, INFER, STATUS, LIVE 1, LIVE 0, LED n, HELP");
   Serial.println("The web page (index.html) sends these for you.");
 }
 
@@ -803,7 +857,7 @@ void myLiveTick() {
   if (!myCentralConnected && !serialOn) return;
   myLastLiveMs = now;
   myUpdateFast();
-  myUpdateStatic();
+  myUpdateSlow(true, true);
   char text[MY_BLE_LIVE_MAXLEN];
   int n = myBuildLiveText(text, sizeof(text));
   if (myCentralConnected) myHeartbeatChar.writeValue((const uint8_t*)text, n);
