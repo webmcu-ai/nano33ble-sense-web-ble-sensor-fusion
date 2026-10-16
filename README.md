@@ -15,15 +15,15 @@ $39.70 USD Nano 33 Ble Sense REV2 at the Arduino Store  https://store-usa.arduin
 
 
 
-# Nano 33 BLE Sense - Sensor Trainer
+# Nano 33 BLE Sense - Sensor Trainer (v006)
 
 One board. No SD card. No second MCU.
 A single web page collects data from **every onboard sensor** of the Arduino Nano 33 BLE Sense over **Web Bluetooth or Web Serial (USB)**, trains a small neural network **in the browser**, and downloads a header file. Put that header next to the sketch, upload, and the Nano boots with the finished model baked into its firmware.
 
 ```
-index.html                          <- the web page (no libraries, works offline)
-nano33-ble-trainer/
-  nano33-ble-trainer.ino            <- the firmware (Arduino IDE folder name must match the .ino name)
+index-v006.html                     <- the web page (no libraries, works offline)
+nano33-ble-trainer-v006/
+  nano33-ble-trainer-v006.ino       <- the firmware (Arduino IDE folder name must match the .ino name)
   myNanoModel.h                     <- you add this: downloaded from the page
 ```
 
@@ -51,8 +51,14 @@ After baking, power the Nano from any USB supply. With no computer talking to it
 | HTS221 | temperature (C), humidity (%) |
 | APDS9960 | proximity (0 near .. 255 far), colour R G B |
 
-One sample = 40 steps x 25 ms (1 s) of the 10 fast channels + one reading of the 7 slow ones.
-Network: Conv1D(5, 8 filters) -> MaxPool -> Dense 32 -> Dense 16 -> softmax. About 5.9k weights (23 KB). Training happens only in the browser; the Nano only does a forward pass.
+One sample = 40 steps x 25 ms (1 s) of all 17 channels (slow sensors are re-read every few steps and held in between).
+Network: Conv1D(5, 8 filters) -> MaxPool -> Dense 32 -> Dense 16 -> softmax. About 5.9k weights (23 KB).
+
+**Sense effect (0 to 1):** click any chart under "Last captured window" to set how much that sense counts. 0 = ignored, 1 = full. The effect is used in training, in the browser test and on the Nano, and is baked into the header. Change effects, then train again.
+
+**Train from start:** untick it to keep training the last model with the current samples.
+
+v006 changed the window layout (17 x 40). Projects and models saved by v003 or older cannot be loaded. Training happens only in the browser; the Nano only does a forward pass.
 
 ## Bluetooth or USB
 
@@ -78,6 +84,4 @@ USB commands (the page sends these; you can also type them in the Serial Monitor
 - *Test on Nano says no model*: press *Send model to Nano*, or bake it.
 
 By Jeremy Ellis, webmcu-ai. MIT license. Use at your own risk.
-
-
 
