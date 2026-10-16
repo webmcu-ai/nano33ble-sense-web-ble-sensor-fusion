@@ -6,7 +6,7 @@ Live Demo at  https://webmcu-ai.github.io/nano33ble-sense-web-ble-sensor-fusion/
 
 
 
-$39.70 USD Nano 33 Ble Sense REV2 at the Arduino Store  https://store-usa.arduino.cc/products/nano-33-ble-sense-rev2-with-headers
+$39.70 USD Nano 33 Ble Sense REV1 or REV2 at the Arduino Store  https://store-usa.arduino.cc/products/nano-33-ble-sense-rev2-with-headers
 
 
 
